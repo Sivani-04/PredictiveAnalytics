@@ -33,6 +33,150 @@ Endpoint	                   Method	                 Purpose
 /optimize-inventory	            POST	               Suggest stock levels
 /visualize-sales	            GET	                   Generate sales trend graph
 
+
+	Database Design: 
+
+1.	Users Table:
+Column Name	                Data Type		          Description
+id	                          UUID	               Unique identifier
+username	                VARCHAR	               User’s name
+email	                    VARCHAR	               User’s email (unique)
+password	                VARCHAR	               Hashed password
+created_at	               TIMESTAMP	           Account creation timestamp
+
+
+2.	Sales Data Table:
+Column Name	               Data Type		         Description
+id	                         UUID	              Unique identifier
+date	                     DATE	              Date of sales entry
+sales	                    INTEGER	              Sales amount
+
+3.	Predictions Table:
+Column Name               Data Type	                 Description
+id	                        UUID	              Unique identifier
+date	                    DATE	              Predicted sales date
+predicted_sales	           INTEGER	              Forecasted sales amount
+
+4.	Inventory Table:
+Column Name	              Data Type	                 Description
+id	                        UUID	              Unique identifier
+product_name	          VARCHAR		          Name of the product
+stock_level	              INTEGER	              Current stock level
+reorder_point	          INTEGER	              Minimum stock level before reorder
+optimal_stock	          INTEGER	              Suggested optimal stock level
+
+	Detailed APIs:
+
+1.	Authentication APIs:
+
+a.	User Registration:
+Path: /register
+Method: POST
+Description: Registers a new user.
+Request Body:
+{
+    "username": "john_doe",
+    "email": "john@example.com",
+    "password": "securepassword"
+}
+Response:
+{
+    "message": "User registered successfully"
+}
+
+b.	User Login:
+Path: /login
+Method: POST
+Description: Authenticates a user and returns a token.
+Request Body: 
+{
+  "email": "john@example.com",
+  "password": "securepassword"
+}
+Response:
+{
+  "token": "jwt_token_here"
+}
+
+2.	Sales Data APIs:
+
+a.	Add Sales Data: 
+Path: /add-sales-data
+Method: POST
+Description: Stores a new sales record in the database.
+Request Body:
+{
+ "date": "2025-02-20",
+ "sales": 200
+}
+Response:
+{
+    "message": "Sales data added successfully"
+}
+
+b.	Fetch Sales Data:
+Path: /get-sales-data
+Method: GET
+Description: Retrieves all stored sales records.
+Response:
+[
+    { "date": "2025-02-18", "sales": 150 },
+    { "date": "2025-02-19", "sales": 180 }
+]
+
+3.	Machine Learning APIs: 
+
+a.	Train Sales Prediction Model: 
+Path: /train-sales-model
+Method: POST
+Description: Trains a machine learning model for sales forecasting.
+Response:
+{
+    "message": "Sales forecasting model trained successfully"
+}
+
+b.	Predict Future Sales:
+Path: /predict-sales
+Method: POST
+Description: Predicts sales for future dates based on past data.
+Request Body:
+{
+    "days": 30
+}
+Response:
+[
+    { "date": "2025-02-21", "predicted_sales": 120 },
+    { "date": "2025-02-22", "predicted_sales": 130 }
+]
+
+4.	Inventory Management APIs:
+
+a.	Optimize Inventory Levels:
+Path: /optimize-inventory
+Method: POST
+Description: Calculates reorder points and optimal stock levels.
+Request Body:
+{
+    "daily_demand": 80,
+    "lead_time": 5
+}
+Response:
+{
+    "reorder_point": 400,
+   "optimal_stock_level": 480
+}
+
+5.	Visualization APIs:
+
+a.	Sales Trends Graph:
+Path: /visualize-sales
+Method: GET
+Description: Generates and saves a sales trend graph.
+Response:
+{
+    "message": "Sales trend graph saved as 'sales_trend.png'"
+}
+
 Expected Outcomes:
 1.	Accurate sales forecasting – Helps businesses plan ahead.
 2.	Optimized inventory levels – Reduces stock wastage and shortages.
