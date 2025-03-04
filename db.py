@@ -4,7 +4,7 @@ import psycopg2 # type: ignore # pip install psycopg2
 from psycopg2 import sql # type: ignore
 from flask_bcrypt import Bcrypt # type: ignore # pip install 
 import jwt # pip install pyjwt
-import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -52,7 +52,8 @@ def create_sales_table_if_not_exists():
         CREATE TABLE IF NOT EXISTS sales (
              sales_id SERIAL PRIMARY KEY,
              date DATE NOT NULL,
-             sales INTEGER NOT NULL
+             sales INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     connection.commit()
@@ -159,6 +160,55 @@ def login_user():
         "message": "Login successful.",
         "token": token
     }), 200
+
+@app.route('/add-sales', methods=['POST'])
+def add_sales():
+    data = request.json
+    date = data['date']
+    sales = data['sales']
+
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("INSERT INTO sales (date, sales) VALUES (%s, %s);", (date, sales))
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({"message": "Sales data added successfully"}), 201
+
+@app.route('/get-sales', methods=['GET'])
+def get_sales():
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    if not start_date or not end_date:
+        return jsonify({"error": "Missing start_date or end_date"}), 400
+
+    try:
+        # Convert input dates
+        start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date, sales FROM sales WHERE date BETWEEN %s AND %s;", (start_date, end_date))
+        sales = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not sales:
+            return jsonify({"message": "No sales data found for the given date range"}), 404
+
+        # Format the response to return only "YYYY-MM-DD"
+        return jsonify([
+            {"date": row[0].strftime("%Y-%m-%d"), "sales": row[1]} for row in sales
+        ])
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
 
 if __name__ == "__main__":
     app.run(debug=True)
