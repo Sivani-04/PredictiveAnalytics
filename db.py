@@ -1,10 +1,20 @@
+MODEL_FILE = "sales_model.pkl"
+MODEL_FILE = "sales_forecast.pkl"
 import json
-from flask import Flask,jsonify, request
+from flask import Flask,jsonify, request, send_file
 import psycopg2 # type: ignore # pip install psycopg2
 from psycopg2 import sql # type: ignore
 from flask_bcrypt import Bcrypt # type: ignore # pip install 
-import jwt # pip install pyjwt
+import jwt # type: ignore # pip install pyjwt
 from datetime import datetime, timedelta
+import pandas as pd # type: ignore
+from sklearn.linear_model import LinearRegression # type: ignore
+import numpy as np # type: ignore
+import pickle
+import logging
+import matplotlib.pyplot as plt # type: ignore
+import seaborn as sns # type: ignore
+import io
 
 app = Flask(__name__)
 
@@ -67,9 +77,9 @@ def create_predictions_table_if_not_exists():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
              prediction_id SERIAL PRIMARY KEY,
-             date DATE NOT NULL,
-             predicted_sales INTEGER NOT NULL
-        )
+             date DATE UNIQUE,
+             predicted_sales FLOAT
+        );
     """)
     connection.commit()
     cursor.close()
@@ -81,11 +91,29 @@ def create_inventory_table_if_not_exists():
     cursor = connection.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS inventory (
-             inventory_id SERIAL PRIMARY KEY,
-             product_name TEXT NOT NULL,
-             stock_level INTEGER NOT NULL,
-             reorder_point INTEGER NOT NULL,
-             optimal_stock INTEGER NOT NULL
+            id SERIAL PRIMARY KEY,
+            days INT NOT NULL,
+            safety_stock DECIMAL(10,2) NOT NULL,
+            optimized_inventory DECIMAL(10,2) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    connection.commit()
+    cursor.close() 
+    connection.close()
+
+# Create the 'pricing' table if it doesn't 
+def create_pricing_table_if_not_exists():
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pricing (
+             id SERIAL PRIMARY KEY,
+             product_id INTEGER NOT NULL,
+             current_price DECIMAL(10,2) NOT NULL,
+             optimized_price DECIMAL(10,2) NOT NULL,
+             demand_elasticity DECIMAL(10,2) NOT NULL,
+             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
     connection.commit()
@@ -96,6 +124,7 @@ create_users_table_if_not_exists()
 create_sales_table_if_not_exists()
 create_predictions_table_if_not_exists()
 create_inventory_table_if_not_exists()
+create_pricing_table_if_not_exists()
 
 bcrypt = Bcrypt(app)
 
@@ -203,6 +232,278 @@ def get_sales():
         return jsonify([
             {"date": row[0].strftime("%Y-%m-%d"), "sales": row[1]} for row in sales
         ])
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
+@app.route('/train-sales-model', methods=['POST'])
+def train_sales_model():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date, sales FROM sales ORDER BY date ASC;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            return jsonify({"error": "No sales data available"}), 404
+
+        # Convert DB data to DataFrame
+        df = pd.DataFrame(rows, columns=['date', 'sales'])
+        df['date'] = pd.to_datetime(df['date'])
+        df['days_since_start'] = (df['date'] - df['date'].min()).dt.days
+
+        # Prepare training data
+        X = df[['days_since_start']]
+        y = df['sales']
+
+        # Train the model
+        model = LinearRegression()
+        model.fit(X, y)
+
+        # Save the trained model
+        with open(MODEL_FILE, "wb") as f:
+            pickle.dump(model, f)
+
+        return jsonify({"message": "Sales forecasting model trained successfully"}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/predict-sales', methods=['POST'])
+def predict_sales():
+    try:
+        data = request.json
+        days = data.get("days", 30)
+
+        # Load trained model
+        with open(MODEL_FILE, "rb") as f:
+            model = pickle.load(f)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Get last available sales date
+        cursor.execute("SELECT MAX(date) FROM sales;")
+        last_date = cursor.fetchone()[0]
+
+        if not last_date:
+            return jsonify({"error": "No sales data available"}), 404
+
+        last_date = pd.to_datetime(last_date)
+        future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
+        future_days_since_start = [(date - last_date).days for date in future_dates]
+
+        # Predict future sales
+        predicted_sales = model.predict(np.array(future_days_since_start).reshape(-1, 1))
+
+        predictions = []
+        for date, sales in zip(future_dates, predicted_sales):
+            formatted_date = date.strftime("%Y-%m-%d")
+            predictions.append({"date": formatted_date, "predicted_sales": round(sales, 2)})
+
+            # Fix: Ensure Unique Constraint or Avoid Conflict
+            cursor.execute("DELETE FROM predictions WHERE date = %s;", (formatted_date,))
+            cursor.execute(
+                "INSERT INTO predictions (date, predicted_sales) VALUES (%s, %s);",
+                (formatted_date, float(sales))  # Convert np.float64 to float
+            )
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify(predictions), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/optimize-pricing', methods=['POST'])
+def optimize_pricing():
+    try:
+        data = request.json
+        product_id = data.get("product_id")
+        current_price = data.get("current_price")
+        demand_elasticity = data.get("demand_elasticity")
+
+        if not product_id or not current_price or not demand_elasticity:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        # Price Optimization Formula
+        optimized_price = round(current_price * (1 + demand_elasticity), 2)
+
+        # Store optimized price in the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO pricing (product_id, current_price, optimized_price, demand_elasticity)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+        """, (product_id, current_price, optimized_price, demand_elasticity))
+        record_id = cursor.fetchone()[0]
+        conn.commit()
+
+        return jsonify({
+            "message": "Price optimization successful",
+            "optimized_price": optimized_price,
+            "record_id": record_id
+        }), 200
+
+    except Exception as e:
+        logging.error(str(e))
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.route('/get-optimized-prices', methods=['GET'])
+def get_optimized_prices():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM pricing;")
+        rows = cursor.fetchall()
+
+        if not rows:
+            return jsonify({"message": "No optimized prices found"}), 404
+
+        results = []
+        for row in rows:
+            results.append({
+                "id": row[0],
+                "product_id": row[1],
+                "current_price": float(row[2]),
+                "optimized_price": float(row[3]),
+                "demand_elasticity": float(row[4]),
+                "created_at": row[5].strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        logging.error(str(e))
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
+ 
+@app.route('/optimize-inventory', methods=['POST'])
+def optimize_inventory():
+    try:
+        data = request.json
+        days = data.get("days", 30)
+        safety_stock = data.get("safety_stock", 10)  # Buffer stock
+        optimized_inventory = 0.0
+        with open(MODEL_FILE, "rb") as f:
+            model = pickle.load(f)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(date) FROM sales;")
+        last_date = cursor.fetchone()[0]
+
+        if not last_date:
+            return jsonify({"error": "No sales data available"}), 404
+
+        last_date = pd.to_datetime(last_date)
+        future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
+        future_days_since_start = [(date - last_date).days for date in future_dates]
+
+        predicted_sales = model.predict(np.array(future_days_since_start).reshape(-1, 1))
+
+        if predicted_sales is None or len(predicted_sales) == 0:
+            return jsonify({"error": "Prediction model failed"}), 500
+
+        total_demand = sum(predicted_sales)
+        optimized_inventory = total_demand + safety_stock  # Add safety stock buffer
+
+        optimized_inventory = float(optimized_inventory)  # Convert NumPy float to Python float
+
+        # Store in the database
+        cursor.execute("""
+            INSERT INTO inventory (days, safety_stock, optimized_inventory)
+            VALUES (%s, %s, %s) RETURNING id;
+        """, (days, safety_stock, optimized_inventory))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({"optimized_inventory": optimized_inventory}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/visualize-sales', methods=['GET'])
+def visualize_sales():
+    try:
+        days = int(request.args.get("days", 30))  # Default forecast range: 30 days
+        safety_stock = int(request.args.get("safety_stock", 10))  # Default buffer stock
+
+        # Load trained sales forecasting model
+        with open(MODEL_FILE, "rb") as f:
+            model = pickle.load(f)
+
+        # Fetch sales data from the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT date, sales FROM sales ORDER BY date ASC;")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        if not rows:
+            return jsonify({"error": "No sales data available"}), 404
+
+        # Convert sales data to DataFrame
+        df = pd.DataFrame(rows, columns=['date', 'sales'])
+        df['date'] = pd.to_datetime(df['date'])
+        df['days_since_start'] = (df['date'] - df['date'].min()).dt.days
+
+        # Get last date in the dataset
+        last_date = df['date'].max()
+        future_dates = [last_date + timedelta(days=i) for i in range(1, days + 1)]
+        future_days_since_start = [(date - df['date'].min()).days for date in future_dates]
+
+        # Predict future sales using the model
+        predicted_sales = model.predict(np.array(future_days_since_start).reshape(-1, 1))
+
+        # Calculate optimized inventory (total demand + safety stock)
+        total_demand = np.sum(predicted_sales)
+        optimized_inventory = total_demand + safety_stock
+
+        # Create visualization
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+
+        # Plot actual and predicted sales on primary y-axis
+        ax1.set_xlabel("Date")
+        ax1.set_ylabel("Sales", color="blue")
+        ax1.plot(df['date'], df['sales'], 'bo-', label="Actual Sales")
+        ax1.plot(future_dates, predicted_sales, 'r--', label="Predicted Sales")
+        ax1.tick_params(axis="y", labelcolor="blue")
+        ax1.legend(loc="upper left")
+
+        # Plot optimized inventory on secondary y-axis
+        ax2 = ax1.twinx()
+        ax2.set_ylabel("Optimized Inventory", color="green")
+        ax2.axhline(y=optimized_inventory, color="green", linestyle="dotted", label="Optimized Inventory")
+        ax2.tick_params(axis="y", labelcolor="green")
+        ax2.legend(loc="upper right")
+
+        # Title and Layout
+        plt.title("Sales Forecasting & Inventory Optimization")
+        plt.grid(True)
+
+        # Save the plot as an image in memory
+        img = io.BytesIO()
+        plt.savefig(img, format="png")
+        img.seek(0)
+        plt.close()
+
+        return send_file(img, mimetype="image/png")
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
